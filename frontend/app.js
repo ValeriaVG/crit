@@ -4052,7 +4052,7 @@
     return createCommentFormUI({
       formObj: formObj,
       headerText: formObj.editingId ? 'Editing comment' : 'Comment',
-      submitText: formObj.editingId ? 'Update' : 'Submit',
+      submitText: formObj.editingId ? 'Update' : 'Comment',
       initialBody: initialBody,
       autoFocus: false
     });
@@ -4522,7 +4522,7 @@
     return createCommentFormUI({
       formObj: formObj,
       headerText: (formObj.editingId ? 'Editing comment on ' : 'Comment on ') + lineRef,
-      submitText: formObj.editingId ? 'Update' : 'Submit',
+      submitText: formObj.editingId ? 'Update' : 'Comment',
       initialBody: initialBody,
       autoFocus: false
     });
@@ -5468,7 +5468,7 @@
     return createCommentFormUI({
       formObj: formObj,
       headerText: 'Comment',
-      submitText: 'Submit',
+      submitText: 'Comment',
       initialBody: '',
       autoFocus: false,
       onSubmit: function(body) { addReviewComment(body); },
@@ -7823,7 +7823,7 @@
         { key: '<kbd>e</kbd>', action: 'Edit comment on focused block' },
         { key: '<kbd>d</kbd>', action: 'Delete comment on focused block' },
         { key: '<kbd>G</kbd>', action: 'General comment' },
-        { key: '<kbd>Ctrl</kbd>+<kbd>Enter</kbd>', action: 'Submit comment' },
+        { key: '<kbd>Ctrl</kbd>+<kbd>Enter</kbd>', action: 'Comment' },
       ]},
       { label: 'Review', shortcuts: [
         { key: '<kbd>Shift</kbd>+<kbd>F</kbd>', action: 'Finish review' },
