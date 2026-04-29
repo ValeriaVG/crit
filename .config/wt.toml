@@ -1,8 +1,10 @@
+# Trust mise.toml before the worktree's shell auto-loads mise — otherwise
+# the shell entry triggers a mise parse error and aborts subsequent hooks.
+[pre-start]
+mise-trust = "mise trust ."
+
 # Copy gitignored files (node_modules, caches, .env, etc.) from the primary
 # worktree so new worktrees skip cold-start installs. Replaces hand-rolled
 # `cp -R` of node_modules — copy-ignored handles all gitignored paths.
-[[post-start]]
+[post-start]
 copy = "wt step copy-ignored"
-
-[[post-start]]
-mise-trust = "mise trust ."
