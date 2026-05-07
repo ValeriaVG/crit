@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -317,9 +316,9 @@ func lockGlobalConfig(path string) (func(), error) {
 	deadline := time.Now().Add(5 * time.Second)
 	backoff := 50 * time.Millisecond
 	for {
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		if err := flockExclusiveNB(f); err == nil {
 			return func() {
-				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = funlock(f)
 				_ = f.Close()
 			}, nil
 		}
@@ -364,6 +363,11 @@ func slUserName() string {
 //   - "exact.file"    → matches filename anywhere in tree
 //   - "path/*.ext"    → filepath.Match against full path
 func matchPattern(pattern, path string) bool {
+	// Patterns are POSIX-style ("dir/", "path/*.ext"). On Windows incoming
+	// paths may carry backslashes (raw output from filepath.WalkDir / Rel);
+	// normalize so the matcher behaves identically across platforms.
+	path = filepath.ToSlash(path)
+
 	// Directory prefix match
 	if strings.HasSuffix(pattern, "/") {
 		prefix := pattern // includes trailing /

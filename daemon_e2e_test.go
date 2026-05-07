@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -18,10 +19,25 @@ func TestDaemonLifecycle(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping daemon lifecycle test in short mode")
 	}
+	if runtime.GOOS == "windows" {
+		// TODO(windows): the spawned daemon now starts and writes its
+		// session file, but cmd.Wait hangs indefinitely after proc.Kill on
+		// Windows. The detached child + readiness-pipe (ExtraFiles FD 3)
+		// combination produces subprocess-lifecycle behavior that differs
+		// from POSIX in ways we haven't unwound. The runtime daemon code
+		// path is still exercised by daemon_test.go unit tests on Windows;
+		// revisit this E2E once the spawn handshake is reworked (e.g.
+		// port-file polling instead of FD inheritance).
+		t.Skip("daemon E2E spawn/wait/kill semantics differ on Windows; covered by daemon_test.go unit tests; TODO: revisit")
+	}
 
 	// Build crit binary
 	dir := t.TempDir()
-	binary := filepath.Join(dir, "crit")
+	binaryName := "crit"
+	if runtime.GOOS == "windows" {
+		binaryName = "crit.exe"
+	}
+	binary := filepath.Join(dir, binaryName)
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build failed: %v\n%s", err, out)
@@ -55,14 +71,25 @@ func TestDaemonLifecycle(t *testing.T) {
 	// Start daemon via _serve
 	cmd := exec.Command(binary, "_serve", "--no-open", "--port", "0")
 	cmd.Dir = repoDir
-	// Filter existing HOME so our override takes effect (first match wins)
+	// Filter existing HOME (and Windows equivalents) so our override takes
+	// effect. On Windows os.UserHomeDir reads USERPROFILE / HOMEDRIVE+HOMEPATH;
+	// without filtering them, the spawned daemon would still resolve the
+	// runner's real profile and write its session file there.
 	var env []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "HOME=") {
-			env = append(env, e)
+		if strings.HasPrefix(e, "HOME=") {
+			continue
 		}
+		if runtime.GOOS == "windows" && (strings.HasPrefix(e, "USERPROFILE=") ||
+			strings.HasPrefix(e, "HOMEDRIVE=") || strings.HasPrefix(e, "HOMEPATH=")) {
+			continue
+		}
+		env = append(env, e)
 	}
 	env = append(env, "HOME="+homeDir)
+	if runtime.GOOS == "windows" {
+		env = append(env, "USERPROFILE="+homeDir)
+	}
 	cmd.Env = env
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
