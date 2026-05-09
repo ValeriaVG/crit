@@ -359,6 +359,9 @@
   let focusedFilePath = null;
   let focusedElement = null; // currently focused navigable element
   let navElements = []; // cached .kb-nav list, rebuilt on render
+  // Vim-style visual line mode (entered with V).
+  // { kind: 'markdown'|'diff', filePath, anchorStartLine, anchorEndLine, anchorSide }
+  let visualMode = null;
   let changeGroups = [];      // [{elements: [DOM], filePath: string}]
   let currentChangeIdx = -1;
 
@@ -3866,6 +3869,168 @@
       if (commentsMap[ln]) result.push(...commentsMap[ln]);
     }
     return result;
+  }
+
+  // ===== Visual Line Mode (vim-style) =====
+  // Anchors on the currently focused block; j/k extend the range; Esc clears it.
+  function enterVisualMode() {
+    if (!focusedElement) return false;
+    const fp = focusedElement.dataset.filePath || focusedElement.dataset.diffFilePath;
+    if (!fp) return false;
+
+    if (focusedElement.dataset.blockIndex !== undefined && focusedElement.dataset.startLine) {
+      const startLine = parseInt(focusedElement.dataset.startLine);
+      const endLine = parseInt(focusedElement.dataset.endLine);
+      visualMode = { kind: 'markdown', filePath: fp, anchorStartLine: startLine, anchorEndLine: endLine };
+      activeFilePath = fp;
+      selectionStart = startLine;
+      selectionEnd = endLine;
+      // Clear any stale unified-diff drag state so it can't bleed into render paths.
+      unifiedVisualStart = null;
+      unifiedVisualEnd = null;
+      document.body.classList.add('visual-mode');
+      refreshVisualSelectionVisuals(fp);
+      return true;
+    }
+    if (focusedElement.dataset.diffLineNum) {
+      // Split rows carry both sides — tagDiffLine on the row records whichever
+      // side existed first (left when present), but the user's intent is
+      // usually the right (new) side. Prefer right; fall back to left for
+      // deleted-only rows. Unified rows are single-side, so just read directly.
+      let lineNum, side;
+      if (focusedElement.classList.contains('diff-split-row')) {
+        const right = focusedElement.querySelector('.diff-split-side.right:not(.empty)');
+        if (right && right.dataset.diffLineNum) {
+          lineNum = parseInt(right.dataset.diffLineNum);
+          side = '';
+        } else {
+          const left = focusedElement.querySelector('.diff-split-side.left:not(.empty)');
+          if (!left || !left.dataset.diffLineNum) return false;
+          lineNum = parseInt(left.dataset.diffLineNum);
+          side = 'old';
+        }
+      } else {
+        lineNum = parseInt(focusedElement.dataset.diffLineNum);
+        side = focusedElement.dataset.diffSide || '';
+      }
+      visualMode = { kind: 'diff', filePath: fp, anchorStartLine: lineNum, anchorEndLine: lineNum, anchorSide: side };
+      activeFilePath = fp;
+      selectionStart = lineNum;
+      selectionEnd = lineNum;
+      document.body.classList.add('visual-mode');
+      refreshVisualSelectionVisuals(fp);
+      return true;
+    }
+    return false;
+  }
+
+  function exitVisualMode(clearSelection) {
+    if (!visualMode) return;
+    const fp = visualMode.filePath;
+    visualMode = null;
+    document.body.classList.remove('visual-mode');
+    if (clearSelection) {
+      selectionStart = null;
+      selectionEnd = null;
+      unifiedVisualStart = null;
+      unifiedVisualEnd = null;
+      activeFilePath = null;
+      if (fp) refreshVisualSelectionVisuals(fp);
+    }
+  }
+
+  // After j/k moves focus, extend the visual selection from the anchor to the new focus.
+  function extendVisualSelection() {
+    if (!visualMode || !focusedElement) return;
+    const fp = visualMode.kind === 'markdown'
+      ? focusedElement.dataset.filePath
+      : focusedElement.dataset.diffFilePath;
+    if (fp !== visualMode.filePath) {
+      // Crossed file boundary — exit visual mode (focus already moved by j/k).
+      exitVisualMode(true);
+      return;
+    }
+    if (visualMode.kind === 'markdown') {
+      if (focusedElement.dataset.blockIndex === undefined) return;
+      const sLine = parseInt(focusedElement.dataset.startLine);
+      const eLine = parseInt(focusedElement.dataset.endLine);
+      selectionStart = Math.min(visualMode.anchorStartLine, sLine);
+      selectionEnd = Math.max(visualMode.anchorEndLine, eLine);
+    } else {
+      // Find the line number on the anchor side. Split rows carry both sides
+      // (and the row's dataset.diffSide is whichever side was tagged first,
+      // which is unreliable for navigation), so query the child sides directly.
+      // Rows with no line on the anchor side (e.g. a deleted-only row when
+      // we anchored on the right) are skipped silently — selection stays put,
+      // visual mode stays active, focus continues moving with j/k.
+      let ln = null;
+      if (focusedElement.classList.contains('diff-split-row')) {
+        const sideSel = visualMode.anchorSide === 'old'
+          ? '.diff-split-side.left:not(.empty)'
+          : '.diff-split-side.right:not(.empty)';
+        const sideEl = focusedElement.querySelector(sideSel);
+        if (sideEl && sideEl.dataset.diffLineNum) {
+          ln = parseInt(sideEl.dataset.diffLineNum);
+        }
+      } else if (focusedElement.dataset.diffLineNum) {
+        // Unified mode — single-side per element, must match anchor.
+        const side = focusedElement.dataset.diffSide || '';
+        if (side !== visualMode.anchorSide) return;
+        ln = parseInt(focusedElement.dataset.diffLineNum);
+      }
+      if (ln === null) return;
+      selectionStart = Math.min(visualMode.anchorStartLine, ln);
+      selectionEnd = Math.max(visualMode.anchorEndLine, ln);
+    }
+    // Update .selected classes incrementally rather than re-rendering the whole
+    // file — re-rendering invalidates the focusedElement reference and trips
+    // the j/k stale-ref recovery (which can mis-resolve when blockIndex values
+    // collide across files).
+    refreshVisualSelectionVisuals(visualMode.filePath);
+  }
+
+  function refreshVisualSelectionVisuals(filePath) {
+    const section = document.getElementById('file-section-' + filePath);
+    if (!section) return;
+    const blocks = section.querySelectorAll('.line-block.kb-nav[data-file-path="' + filePath + '"]');
+    for (let i = 0; i < blocks.length; i++) {
+      const lb = blocks[i];
+      const sLine = parseInt(lb.dataset.startLine);
+      const eLine = parseInt(lb.dataset.endLine);
+      const inSel = selectionStart !== null && selectionEnd !== null
+        && sLine >= selectionStart && eLine <= selectionEnd;
+      lb.classList.toggle('selected', inSel);
+    }
+    // Split-mode diff sides: each side has its own line numbers + side tag.
+    // .selected only applies on the anchor-matching side (matches the render
+    // path in makeSplitRow, lines 3730 / 3772).
+    const splitSides = section.querySelectorAll('.diff-split-side[data-diff-file-path="' + filePath + '"]');
+    const anchorSide = visualMode && visualMode.kind === 'diff' ? visualMode.anchorSide : null;
+    for (let i = 0; i < splitSides.length; i++) {
+      const sEl = splitSides[i];
+      if (sEl.classList.contains('empty') || !sEl.dataset.diffLineNum) {
+        sEl.classList.toggle('selected', false);
+        continue;
+      }
+      const ln = parseInt(sEl.dataset.diffLineNum);
+      const side = sEl.dataset.diffSide || '';
+      const sideMatches = anchorSide === null || side === anchorSide;
+      const inSel = sideMatches && selectionStart !== null && selectionEnd !== null
+        && ln >= selectionStart && ln <= selectionEnd;
+      sEl.classList.toggle('selected', inSel);
+    }
+    // Unified-mode diff lines: single-side per element, side matches anchor.
+    const unifiedLines = section.querySelectorAll('.diff-container.unified .diff-line[data-diff-file-path="' + filePath + '"]');
+    for (let i = 0; i < unifiedLines.length; i++) {
+      const ul = unifiedLines[i];
+      if (!ul.dataset.diffLineNum) continue;
+      const ln = parseInt(ul.dataset.diffLineNum);
+      const side = ul.dataset.diffSide || '';
+      const sideMatches = anchorSide === null || side === anchorSide;
+      const inSel = sideMatches && selectionStart !== null && selectionEnd !== null
+        && ln >= selectionStart && ln <= selectionEnd;
+      ul.classList.toggle('selected', inSel);
+    }
   }
 
   // ===== Gutter Drag Selection =====
@@ -8403,6 +8568,7 @@
       { label: 'Navigation', shortcuts: [
         { key: '<kbd>j</kbd>', action: 'Next block' },
         { key: '<kbd>k</kbd>', action: 'Previous block' },
+        { key: '<kbd>Shift</kbd>+<kbd>V</kbd>', action: 'Visual line mode (extend with j/k, then c to comment)' },
         { key: '<kbd>]</kbd>', action: 'Next comment' },
         { key: '<kbd>[</kbd>', action: 'Previous comment' },
         { key: '<kbd>n</kbd>', action: 'Next change', mode: 'file mode' },
@@ -8595,10 +8761,47 @@
           focusedFilePath = focusedElement.dataset.diffFilePath;
           focusedBlockIndex = null;
         }
+        if (visualMode) extendVisualSelection();
+        break;
+      }
+      case 'V': {
+        e.preventDefault();
+        if (visualMode) {
+          // Toggle off — preserve the focus on the current expansion point.
+          exitVisualMode(true);
+        } else {
+          enterVisualMode();
+        }
         break;
       }
       case 'c': {
         e.preventDefault();
+        // Visual mode: comment on the active selection.
+        if (visualMode && selectionStart !== null && selectionEnd !== null) {
+          const fp = visualMode.filePath;
+          if (visualMode.kind === 'markdown') {
+            const file = getFileByPath(fp);
+            if (file && file.lineBlocks) {
+              let lastBlockIndex = -1;
+              for (let i = 0; i < file.lineBlocks.length; i++) {
+                if (file.lineBlocks[i].startLine >= selectionStart && file.lineBlocks[i].endLine <= selectionEnd) {
+                  lastBlockIndex = i;
+                }
+              }
+              if (lastBlockIndex >= 0) {
+                visualMode = null;
+                document.body.classList.remove('visual-mode');
+                openForm({ filePath: fp, afterBlockIndex: lastBlockIndex, startLine: selectionStart, endLine: selectionEnd, editingId: null });
+              }
+            }
+          } else {
+            const side = visualMode.anchorSide;
+            visualMode = null;
+            document.body.classList.remove('visual-mode');
+            openForm({ filePath: fp, afterBlockIndex: null, startLine: selectionStart, endLine: selectionEnd, editingId: null, side: side || undefined });
+          }
+          return;
+        }
         // If text is selected, comment on the selection (with quote).
         // Otherwise fall back to the focused block.
         if (tryOpenFormFromSelection()) return;
@@ -8723,6 +8926,9 @@
         else if (activeForms.length > 0) {
           const form = activeForms[activeForms.length - 1];
           if (confirmDiscardCommentForm(form)) cancelComment(form);
+        }
+        else if (visualMode) {
+          exitVisualMode(true);
         }
         else if (selectionStart !== null) {
           const clearPath = activeFilePath;
