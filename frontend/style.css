@@ -3157,15 +3157,16 @@ body.sidebar-resizing * {
   flex-shrink: 0;
   line-height: 1;
   border-radius: 3px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.file-header:hover .file-header-copy-path,
-.file-header-copy-path:focus-visible {
-  opacity: 1;
+  transition: color 0.15s;
 }
 .file-header-copy-path:hover {
   color: var(--crit-brand);
+}
+.file-header-copy-path:focus-visible {
+  color: var(--crit-brand);
+  outline: 2px solid var(--crit-brand);
+  outline-offset: 2px;
+  border-radius: 3px;
 }
 /* Copy button in navbar (branch name / filename chip) */
 .header-copy-path {
@@ -3181,6 +3182,12 @@ body.sidebar-resizing * {
 }
 .header-copy-path:hover {
   color: var(--crit-brand);
+}
+.header-copy-path:focus-visible {
+  color: var(--crit-brand);
+  outline: 2px solid var(--crit-brand);
+  outline-offset: 2px;
+  border-radius: 3px;
 }
 
 /* ===== Comments Panel (Right Sidebar) ===== */
