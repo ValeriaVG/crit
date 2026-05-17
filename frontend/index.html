@@ -248,8 +248,9 @@
     // so pathname is the most reliable trigger — survives reload, doesn't
     // depend on a query string being present.
     var isDesign = window.location.pathname === '/design';
+    var isPreview = window.location.pathname === '/preview';
 
-    if (isDesign) {
+    if (isDesign || isPreview) {
       // Keep <body> intact and just mark <html> with a mode class. style-design.css
       // hides code-review-only chrome (file tree, main-content, comments-panel,
       // pr-panel, etc.) while keeping the header + settings overlay alive, so the
