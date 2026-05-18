@@ -323,7 +323,9 @@
     // Extract initial route from the origin URL path (e.g.
     // "http://localhost:3333/live.html" → "/live.html") so the iframe
     // loads the correct page instead of always requesting "/".
-    if (!state.isPreview && state.session.origin) {
+    if (state.isPreview) {
+      state.currentRoute = '/preview-content';
+    } else if (state.session.origin) {
       try {
         var originPath = new URL(state.session.origin).pathname;
         if (originPath && originPath !== '/') state.currentRoute = originPath;
@@ -476,7 +478,9 @@
   // ============================================================
   function proxyURL(pathname) {
     if (state.isPreview) {
-      return '/preview-content' + (pathname || '/');
+      var p = pathname || '/';
+      if (p.indexOf('/preview-content') === 0) p = p.slice('/preview-content'.length) || '/';
+      return '/preview-content' + p;
     }
     var s = state.session || {};
     var port = s.proxy_port || 0;
@@ -2006,7 +2010,7 @@
     }
     if (state.pendingFlashOnLoad && state.pendingPinId) {
       var pin = lookupPin(state.pendingPinId);
-      if (pin && pin.dom_anchor && pin.dom_anchor.pathname === state.currentRoute) {
+      if (pin && pin.dom_anchor && utils.normaliseRoute(pin.dom_anchor.pathname) === state.currentRoute) {
         performFlashAndScroll(pin);
       }
     }
@@ -2260,7 +2264,7 @@
       state.pendingPinId = null;
       return;
     }
-    var targetPath = (pin.dom_anchor && pin.dom_anchor.pathname) || '/';
+    var targetPath = utils.normaliseRoute((pin.dom_anchor && pin.dom_anchor.pathname) || '/');
     if (state.currentRoute !== targetPath) {
       if (els && els.iframe) {
         try { els.iframe.src = proxyURL(targetPath); } catch (_) { /* noop */ }

@@ -542,22 +542,24 @@
       updateUnresolvedBadge();
     }
 
-    // Navigate to comment via ContentRenderer interface. Validates that
-    // scrollToAnchor + highlightAnchor work for live-mode pins when a
-    // comment card is clicked in the panel.
+    // Scroll to pinned element and flash its marker badge when a comment
+    // card is clicked in the panel. keep-highlight scrolls into view +
+    // adds a transient highlight; clear-highlight removes it after 1s.
+    // flash-marker pulses the badge overlay (1.5s, agent-managed).
     var _highlightTimer = null;
-    function navigateToCommentViaRenderer(comment) {
-      var renderer = window.crit && window.crit.renderer && window.crit.renderer.current();
-      if (!renderer) return;
+    function scrollAndFlashPin(comment) {
+      if (!comment || !comment.id) return;
+      if (!state || !state.postToAgent) return;
       if (_highlightTimer) { clearTimeout(_highlightTimer); _highlightTimer = null; }
-      var anchor = window.crit.renderer.anchorFromComment(comment);
-      renderer.scrollToAnchor(anchor).then(function () {
-        renderer.highlightAnchor(anchor);
+      var anchor = comment.dom_anchor || comment.domAnchor;
+      if (anchor && anchor.css_selector) {
+        state.postToAgent({ type: 'keep-highlight', selector: anchor.css_selector });
         _highlightTimer = setTimeout(function () {
-          renderer.clearHighlight();
+          state.postToAgent({ type: 'clear-highlight' });
           _highlightTimer = null;
         }, 1000);
-      });
+      }
+      state.postToAgent({ type: 'flash-marker', pin_id: comment.id });
     }
 
     var _cardClickInstalled = false;
@@ -572,7 +574,7 @@
         var id = card.dataset.id;
         if (!id || !state.comments) return;
         var comment = state.comments.find(function (c) { return String(c.id) === id; });
-        if (comment) navigateToCommentViaRenderer(comment);
+        if (comment) scrollAndFlashPin(comment);
       });
     }
 
