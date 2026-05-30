@@ -99,6 +99,7 @@ type shareFile struct {
 	Content   string `json:"content"`
 	Status    string `json:"status,omitempty"`
 	Generated bool   `json:"generated,omitempty"`
+	Encoding  string `json:"encoding,omitempty"`
 }
 
 // shareReply represents a reply to include in the shared review.
@@ -158,13 +159,16 @@ func shareFileEntries(files []shareFile) []map[string]any {
 		if f.Generated {
 			entry["generated"] = true
 		}
+		if f.Encoding != "" {
+			entry["encoding"] = f.Encoding
+		}
 		entries[i] = entry
 	}
 	return entries
 }
 
 // buildSharePayload constructs the JSON payload for POST /api/reviews.
-func buildSharePayload(files []shareFile, comments []shareComment, reviewRound int, cliArgs []string, org, visibility string) map[string]any {
+func buildSharePayload(files []shareFile, comments []shareComment, reviewRound int, cliArgs []string, org, visibility, reviewType string) map[string]any {
 	fileList := shareFileEntries(files)
 	if comments == nil {
 		comments = []shareComment{}
@@ -182,6 +186,9 @@ func buildSharePayload(files []shareFile, comments []shareComment, reviewRound i
 	}
 	if visibility != "" {
 		payload["visibility"] = visibility
+	}
+	if reviewType != "" {
+		payload["review_type"] = reviewType
 	}
 	return payload
 }
@@ -214,14 +221,47 @@ type shareReviewFilesResult struct {
 	Comments    []shareComment
 }
 
+// loadPreviewShareComments loads ALL of a preview session's comments and re-keys
+// them to previewMainHTMLKey. Preview DOM pins live in separate "live-route"
+// FileEntries keyed by the iframe pathname (/preview-content), distinct from the
+// previewed HTML's "code" entry — so comments must be loaded across EVERY
+// session path (sessionPaths = Session.FilePathsSnapshot()), not just the HTML's,
+// then collapsed onto the single crawl entry. Used by the proxy preview-payload
+// and re-share upsert-payload builders; handleShare gets the same effect by
+// passing all session paths through shareReviewFiles.
+func loadPreviewShareComments(critPath string, sessionPaths []string, fallbackAuthor string) ([]shareComment, int) {
+	comments, reviewRound := loadCommentsForShare(critPath, sessionPaths, fallbackAuthor)
+	remapPreviewCommentFiles(comments)
+	return comments, reviewRound
+}
+
+// remapPreviewCommentFiles re-keys per-file comments to previewMainHTMLKey so
+// they attach to the crawled HTML entry in a preview share payload. Review-level
+// comments (empty File) are left untouched. Preview is a single rendered page,
+// so every per-file comment (including DOM pins on live-route entries) collapses
+// onto the one previewed HTML.
+func remapPreviewCommentFiles(comments []shareComment) {
+	for i := range comments {
+		if comments[i].File != "" {
+			comments[i].File = previewMainHTMLKey
+		}
+	}
+}
+
 // shareReviewFiles loads comments + cli_args from the review file at critPath
 // and POSTs the files to crit-web. Used by both the CLI (`crit share`) and the
 // server's POST /api/share endpoint so payload wiring stays in one place.
-func shareReviewFiles(critPath string, files []shareFile, filePaths []string, svcURL, authToken, fallbackAuthor, org, visibility string) (shareReviewFilesResult, error) {
+func shareReviewFiles(critPath string, files []shareFile, filePaths []string, svcURL, authToken, fallbackAuthor, org, visibility, reviewType string) (shareReviewFilesResult, error) {
 	comments, reviewRound := loadCommentsForShare(critPath, filePaths, fallbackAuthor)
+	if reviewType == "preview" {
+		// Preview comments are stored under the session's on-disk path (passed
+		// in filePaths) but the crawled payload keys the HTML as
+		// previewMainHTMLKey — re-key so crit-web attaches them to that entry.
+		remapPreviewCommentFiles(comments)
+	}
 	cliArgs := loadCliArgsFromReviewFile(critPath)
 
-	url, deleteToken, err := shareFilesToWeb(files, comments, svcURL, reviewRound, authToken, cliArgs, org, visibility)
+	url, deleteToken, err := shareFilesToWeb(files, comments, svcURL, reviewRound, authToken, cliArgs, org, visibility, reviewType)
 	if err != nil {
 		return shareReviewFilesResult{}, err
 	}
@@ -234,8 +274,8 @@ func shareReviewFiles(critPath string, files []shareFile, filePaths []string, sv
 }
 
 // shareFilesToWeb uploads files to a crit-web instance and returns the share URL and delete token.
-func shareFilesToWeb(files []shareFile, comments []shareComment, shareURL string, reviewRound int, authToken string, cliArgs []string, org, visibility string) (string, string, error) {
-	payload := buildSharePayload(files, comments, reviewRound, cliArgs, org, visibility)
+func shareFilesToWeb(files []shareFile, comments []shareComment, shareURL string, reviewRound int, authToken string, cliArgs []string, org, visibility, reviewType string) (string, string, error) {
+	payload := buildSharePayload(files, comments, reviewRound, cliArgs, org, visibility, reviewType)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", "", fmt.Errorf("marshaling payload: %w", err)

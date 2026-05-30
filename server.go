@@ -149,6 +149,7 @@ func NewServer(session *Session, frontendFS embed.FS, shareURL string, proxyAuth
 	mux.HandleFunc("/api/share", s.withReady(s.handleShare))
 	mux.HandleFunc("/api/share-consent", s.withReady(s.handleShareConsent))
 	mux.HandleFunc("/api/share/payload", s.withReady(s.handleSharePayload))
+	mux.HandleFunc("/api/share/preview-payload", s.withReady(s.handlePreviewPayload))
 	mux.HandleFunc("/api/share/upsert-payload", s.withReady(s.handleUpsertPayload))
 	mux.HandleFunc("/api/share-url", s.withReady(s.handleShareURL))
 	mux.HandleFunc("/api/comments/merge", s.withReady(s.handleMergeComments))
@@ -423,6 +424,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Integration detection
 	s.addIntegrationStatus(resp)
+
+	if sess != nil && sess.ReviewType != "" {
+		resp["review_type"] = sess.ReviewType
+	}
 
 	if len(s.staleIntegrations) > 0 {
 		type staleInfo struct {
@@ -699,6 +704,10 @@ func (s *Server) handleShareURL(w http.ResponseWriter, r *http.Request) {
 		}
 		s.session.Load().SetSharedURLAndToken(body.URL, body.DeleteToken)
 		s.session.Load().SetShareOrgInfo(body.Org, body.OrgName, body.Visibility)
+		// Persist the share scope from the session's file identity (matches the
+		// direct POST /api/share path) so the shared status is restored on
+		// restart in proxy-auth mode too, not just direct mode.
+		s.session.Load().SetShareScope(shareScope(s.session.Load().FilePathsSnapshot()))
 		writeJSON(w, map[string]string{
 			"ok":           "true",
 			"hosted_token": tokenFromHostedURL(body.URL),
@@ -723,6 +732,23 @@ func (s *Server) handleShareURL(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// shareFilesForSession returns the files to upload for the active session plus
+// the review_type to tag the share with. For preview sessions it crawls the
+// previewed HTML origin and its local assets; otherwise it loads the on-disk
+// review files unchanged. Single source of truth for both the direct Share
+// button path (handleShare) and the proxy-auth relay (handlePreviewPayload).
+func (s *Server) shareFilesForSession() (files []shareFile, reviewType string, err error) {
+	sess := s.session.Load()
+	if sess != nil && sess.ReviewType == "preview" {
+		files, err = crawlPreview(sess.Origin)
+		if err != nil {
+			return nil, "", fmt.Errorf("crawling preview assets: %w", err)
+		}
+		return files, "preview", nil
+	}
+	return sess.LoadShareFilesFromDisk(), "", nil
 }
 
 // handleShare uploads the current session to crit-web and returns the share URL.
@@ -752,11 +778,15 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read file content from disk and comments from the review file.
-	// This uses the same disk-based path as `crit share` (CLI), ensuring
-	// a single source of truth for the share payload. The review file is
-	// kept current by saveCritJSON (200ms debounce on every comment change).
-	files := s.session.Load().LoadShareFilesFromDisk()
+	// Read file content for the share. Preview sessions crawl the previewed
+	// HTML origin + assets; other sessions use the on-disk review files (kept
+	// current by saveCritJSON). shareFilesForSession is the single source of
+	// truth shared with the proxy-auth relay path.
+	files, reviewType, err := s.shareFilesForSession()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if len(files) == 0 {
 		http.Error(w, "no files in session", http.StatusBadRequest)
 		return
@@ -781,7 +811,20 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	critPath := s.session.Load().critJSONPath()
-	res, err := shareReviewFiles(critPath, files, filePaths, s.shareURL, s.authTokenSnapshot(), s.author, shareReq.Org, shareReq.Visibility)
+
+	// Comments are loaded from the review file by their session path. For a
+	// preview the uploaded files are crawled (keyed "index.html"), but the
+	// comments live under the session's previewed-file path — pass that so they
+	// load, then shareReviewFiles re-keys them to the crawl entry. The scope is
+	// always the session's file identity so restoreShareStateLocked matches it
+	// on restart (it recomputes scope from s.Files, not from the crawled set).
+	scopePaths := s.session.Load().FilePathsSnapshot()
+	commentPaths := filePaths
+	if reviewType == "preview" {
+		commentPaths = scopePaths
+	}
+
+	res, err := shareReviewFiles(critPath, files, commentPaths, s.shareURL, s.authTokenSnapshot(), s.author, shareReq.Org, shareReq.Visibility, reviewType)
 	if err != nil {
 		if errors.Is(err, errShareUnauthorized) {
 			clearAuthIdentity()
@@ -794,7 +837,7 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.session.Load().SetSharedURLAndToken(res.URL, res.DeleteToken)
-	s.session.Load().SetShareScope(shareScope(filePaths))
+	s.session.Load().SetShareScope(shareScope(scopePaths))
 	s.session.Load().SetShareOrgInfo(shareReq.Org, shareReq.OrgName, shareReq.Visibility)
 	writeJSON(w, map[string]any{"url": res.URL, "delete_token": res.DeleteToken})
 }
@@ -948,7 +991,40 @@ func (s *Server) handleSharePayload(w http.ResponseWriter, r *http.Request) {
 	critPath := sess.critJSONPath()
 	comments, reviewRound := loadCommentsForShare(critPath, filePaths, s.author)
 	cliArgs := loadCliArgsFromReviewFile(critPath)
-	writeJSON(w, buildSharePayload(files, comments, reviewRound, cliArgs, "", ""))
+	writeJSON(w, buildSharePayload(files, comments, reviewRound, cliArgs, "", "", ""))
+}
+
+// handlePreviewPayload returns the share payload for a preview session: it
+// crawls the previewed HTML origin and its local assets, then builds the same
+// POST /api/reviews payload the direct Share path produces, tagged with
+// review_type=preview. Used by the proxy-auth relay so the browser popup can
+// forward the snapshot through an authenticated session (relay is transport,
+// not protocol — same endpoint, same payload shape).
+func (s *Server) handlePreviewPayload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sess := s.session.Load()
+	if sess == nil || sess.ReviewType != "preview" {
+		http.Error(w, "not a preview session", http.StatusBadRequest)
+		return
+	}
+	files, err := crawlPreview(sess.Origin)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Include the previewed file's comments, re-keyed to the crawl entry, so the
+	// proxy relay uploads the same payload (files + comments) as the direct
+	// POST /api/share path. Comments span all session paths (DOM pins live on
+	// live-route entries, not the HTML's "code" entry), so load across all of
+	// them — not just the first. Without this, sharing via popup loses comments.
+	comments, reviewRound := loadPreviewShareComments(sess.critJSONPath(), sess.FilePathsSnapshot(), s.author)
+	if reviewRound == 0 {
+		reviewRound = 1
+	}
+	writeJSON(w, buildSharePayload(files, comments, reviewRound, nil, "", "", "preview"))
 }
 
 // handleUpsertPayload returns the JSON payload that would be PUT to
@@ -959,19 +1035,37 @@ func (s *Server) handleUpsertPayload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := s.session.Load()
-	files := sess.LoadShareFilesFromDisk()
+	// Preview sessions have no on-disk review files (the FileEntry has no AbsPath),
+	// so LoadShareFilesFromDisk returns empty → "no files in session". Use
+	// shareFilesForSession, which crawls the preview HTML origin + assets (the same
+	// source as the initial share) and returns on-disk files for other modes.
+	files, reviewType, err := s.shareFilesForSession()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
 	if len(files) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "no files in session"})
 		return
 	}
-	filePaths := make([]string, len(files))
-	for i, f := range files {
-		filePaths[i] = f.Path
-	}
 	critPath := sess.critJSONPath()
-	comments, reviewRound := loadCommentsForShare(critPath, filePaths, s.author)
+	var comments []shareComment
+	var reviewRound int
+	if reviewType == "preview" {
+		// Load comments across all session paths (DOM pins on live-route entries)
+		// and collapse onto the crawl entry, matching the initial-share payload.
+		comments, reviewRound = loadPreviewShareComments(critPath, sess.FilePathsSnapshot(), s.author)
+	} else {
+		filePaths := make([]string, len(files))
+		for i, f := range files {
+			filePaths[i] = f.Path
+		}
+		comments, reviewRound = loadCommentsForShare(critPath, filePaths, s.author)
+	}
 	cliArgs := loadCliArgsFromReviewFile(critPath)
 	deleteToken := sess.GetDeleteToken()
 	writeJSON(w, buildUpsertPayload(files, comments, deleteToken, reviewRound, cliArgs))
