@@ -18,7 +18,7 @@ Crit adds a proper interface for each type of output and lets you point at the e
 
 - `crit plan.md` renders a markdown file with proper formatting and review UI
 - `crit http://localhost:3000` proxies your running app and adds a review interface to it
-- `crit landing.html` would render a static HTML artifact to review
+- `crit landing.html` renders a static HTML artifact to review
 - `crit` would auto-detect git changes and show syntax-highlighted diffs for local review.
 
 Everything runs locally via one single binary.
