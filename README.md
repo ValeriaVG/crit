@@ -16,7 +16,7 @@ For agents, plans and code are all the same - it's just text, but for us, humans
 
 Crit adds a proper interface for each type of output and lets you point at the exact thing that is wrong and leave a comment for the agent to fix:
 
-- `crit plan.md` would render markdown file with proper formatting and review UI
+- `crit plan.md` renders a markdown file with proper formatting and review UI
 - `crit http://localhost:3000` would proxy your running app and add a review surface to it
 - `crit landing.html` would render a static HTML artifact to review
 - `crit` would auto-detect git changes and show syntax-highlighted diffs for local review.
